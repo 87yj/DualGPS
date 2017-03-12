@@ -27,6 +27,8 @@ import signal
 import re
 import select
 
+
+
 matplotlib.use('TkAgg')
 
 from numpy import arange, sin, pi
@@ -44,8 +46,12 @@ else:
 root = Tk.Tk()
 root.wm_title("Embedding in TK")
 
-Graphing = False
+Graphing = True
 OutSocket = True
+latesttimestamp = 0
+UpdateRate = 5  #in Hertz - samples per second
+UpdateInterval = 1/UpdateRate #time bewteen expected updates in seconds
+
 
 
 exitall = False
@@ -75,7 +81,7 @@ def read_GPS_USB(ComChannel):
         print("no serial data found")
         ser1.close
 
-def read_data(S, q, qrmc, gpsnum):
+def read_data(S, q, qvtg, gpsnum):
     print("in thread ", gpsnum)
     #kk=0
     #delta_time = -99.99
@@ -84,7 +90,7 @@ def read_data(S, q, qrmc, gpsnum):
     #shutdown_flag = threading.Event()
     stringdata1 = ""
     
-
+    ###Use this and determine if the string is at the timestamp expected
     while not exitall:
         #print("looping", exitall)
         ready = select.select([S], [],[], 1)
@@ -110,12 +116,12 @@ def read_data(S, q, qrmc, gpsnum):
                     pass
             elif GPSsentence2 in lines:
                 try: 
-                    validrmc = checksum_nmea(lines)
-                    if (validrmc==True):
-                        rmc=pynmea2.parse(lines)  # parse the string
-                    #print(validrmc)
-                        qrmc.put_nowait(rmc)
-                    #print("New rmc", gpsnum,  rmc)
+                    validvtg = checksum_nmea(lines)
+                    if (validvtg==True):
+                        vtg=pynmea2.parse(lines)  # parse the string
+                    #print(validvtg)
+                        qvtg.put_nowait(vtg)
+ 
                 except:
                     pass
             else:
@@ -125,15 +131,16 @@ def read_data(S, q, qrmc, gpsnum):
             #time.sleep(0.5)
             with q.mutex:
                 q.queue.clear()
-        #if (qrmc.qsize() > 3 ):
-            #print("Items backing up in RMC queue", qrmc.qsize())
-            #print (qrmc)
+        #if (qvtg.qsize() > 3 ):
+            #print("Items backing up in vtg queue", qvtg.qsize())
+            #print (qvtg)
             #time.sleep(0.5)
-            #with qrmc.mutex:
-                #qrmc.queue.clear()
+            #with qvtg.mutex:
+                #qvtg.queue.clear()
         time.sleep(0.02)        
-    print("Exiting", gpsnum)
+    
     q.empty()
+    print("Exiting", gpsnum)
     
     
     
@@ -194,13 +201,18 @@ def do_GPS_Calcs(GPS1, GPS2, GPS1_Valid, GPS2_Valid, qout):
         distancebtwn_measured = np.sqrt((utmdata2[0]-utmdata1[0])**2+(utmdata2[1]-utmdata1[1])**2)
         CenterPos = [(utmdata1[0]+utmdata2[0])/2, (utmdata1[1]+utmdata2[1])/2]
         
-        heading21 = np.math.degrees(np.math.atan2((utmdata2[0]-utmdata1[0]),(utmdata2[1]-utmdata1[1])))
-        if (heading21 >= 0 and heading21 <90):
-            heading = 360 - heading21
-        elif (heading21 >=90 and heading21<=180):
-            heading = heading21-90
-        elif (heading21 >= -180 and heading21<0):
-            heading = 270 + heading21
+        heading21 = np.math.degrees(np.math.atan2((utmdata2[1]-utmdata1[1]), (utmdata2[0]-utmdata1[0])))
+        print(("N2", utmdata2[1], "N1", utmdata1[1], "E2", utmdata2[0], "E1", utmdata1[0]))
+        print("hjeading 21:" , heading21)
+        ##Math needas further vetting here to make sure this is computing right.
+        if (heading21 >= 0 and heading21 <=90):
+            heading = 90 - heading21  
+        elif (heading21 >90 and heading21<=180):
+            heading = 450 - heading21
+        elif (heading21 <0 and heading21 >= -90):
+            heading = -1*heading21
+        elif (heading21 >= -180 and heading21 < -90):
+            heading = 90+(-1*heading21)
         else:
             print("Heading error")
         #print("Heading21 :", heading21, "  VehicleHeading: ", heading)
@@ -209,7 +221,9 @@ def do_GPS_Calcs(GPS1, GPS2, GPS1_Valid, GPS2_Valid, qout):
         gps1_time_current = datetime.combine(date.today(), GPS1.timestamp)
         heightdiff = height2-height1
         if(Graphing == True): ax.scatter((utmdata1[0]+utmdata2[0])/2, (utmdata1[1]+utmdata2[1])/2, color = 'black', marker = 's', label = 'MidPt')
-        if(Graphing == True):ax2.plot(gps1_time_current, heading, color = col, marker ="s")  
+        if(Graphing == True):
+            ax2.plot(gps1_time_current, heading, color = col, marker ="s")  
+            ax2.plot(gps1_time_current, heading21, color = 'black', marker ="o")
         CenterLatLon = utm.to_latlon(CenterPos[0], CenterPos[1], utmdata1[2], utmdata1[3])
         #print("here", heightdiff, distbtwn_act)
         if(abs(heightdiff)<distbtwn_act):
@@ -217,18 +231,31 @@ def do_GPS_Calcs(GPS1, GPS2, GPS1_Valid, GPS2_Valid, qout):
             tilt = np.math.degrees(np.math.asin(heightdiff/distbtwn_act))
             if(Graphing == True):ax3.set_visible(True)  
             col = "green"
+            CorrectedCenterPos = correct_for_tilt(CenterPos, heading, tilt)
+            CorrectedLatLon = utm.to_latlon(CorrectedCenterPos[0], CorrectedCenterPos[1], utmdata1[2], utmdata1[3])
         else:
             tilt= 0
             if(Graphing == True):ax3.text(0,gps1_time_current, "Invalid Height Data for Tilt")
             #ax3.set_visible(False)
             col = "red"
+            
     NMEA_string = create_NMEA_out(GPS1, GPS2, tilt, heading, activeGPS, qout)
     #s3.send(NMEA_string)
     
     
-def correct_for_tilt (GPS1, GPS2, tilt):
+def correct_for_tilt (CenterPos, heading, tilt):
     #this function takes the absolute data and corrects for tilt as measured by the 2 GPS's
-    tilterror = np.math.tan(np.math.radians(tilt))*GPS_mouting_height
+    GPS_mounting_height = 2.4 #METERS
+    #NEED TO COMPENSATE FOR HEADINGS NOT 0 or 180
+    easting_meas = CenterPos[0]
+    northing_meas = CenterPos[1]
+    tilterr = (np.math.tan(np.math.radians(tilt))*GPS_mounting_height)
+    easting_act = easting_meas+tilterr*np.math.cos(np.math.radians(heading))
+    northing_act= northing_meas-tilterr*np.math.sin(np.math.radians(heading))
+    print("Heading:",  round(heading,2), "tilt", round(tilt,2), "tilterr", round(tilterr,3), "EM", round(easting_meas,3), "EA", round(easting_act,3), "NM:",round(northing_meas,3), "NA:",round(northing_act, 3))
+    print("EM-EA: ", easting_meas - easting_act, "  NM-NA: ", northing_meas-northing_act)
+       # easting_act = tilterr*
+    return(easting_act, northing_act)
     #need to break this down into X and Y UTM components, based on the heading presumably.
         
 def create_NMEA_out(GPS1,GPS2, tilt, heading, activeGPS, qout):
@@ -265,7 +292,8 @@ def create_NMEA_out(GPS1,GPS2, tilt, heading, activeGPS, qout):
         age_out = str(((float(GPS1.age_gps_data) + float(GPS2.age_gps_data))/2))
         refid_out = GPS1.ref_station_id
         NMEAoutGGA = pynmea2.GGA('GP', 'GGA', (time_out, LatStrng, latdir_out, LonStrng, londir_out, gpsqual_out, numsats_out, HDOP_out, alt_out, altunits_out, geosep_out, geosepunits_out, age_out, refid_out))
-        NMEAoutRMC = pynmea2.RMC('GP', 'RMC', (time_out, 'A', LatStrng, latdir_out, LonStrng, londir_out, "12.0", "260.2", "070317", "1.2"))  #eedoverground, trackangle, dateDDMMYY,  MagVar))
+        
+        #NMEAoutVTG = pynmea2.VTG('GP', 'VTG', (time_out, 'A', LatStrng, latdir_out, LonStrng, londir_out, "12.0", "260.2", "070317", "1.2"))  #eedoverground, trackangle, dateDDMMYY,  MagVar))
         #print("Both GPS's active", NMEAoutGGA)
     elif (activeGPS == '1'):
         #print ("GPS1 lon dir", GPS1.lon_dir)
@@ -318,7 +346,7 @@ def output_NMEA_String(s3, qout):
             NMEAdata = str(NMEAdata)
             
             bNMEAdata = NMEAdata.encode('utf-8')
-            print("NMEA Data out: ", NMEAdata)
+            #print("NMEA Data out: ", NMEAdata)
             #bNMEAdata = NMEAdata.encode('utf-8')
             #s3.sendto(bNMEAdata,(HOST, PORT))
             if(OutSocket == True): s3.send(bNMEAdata)
@@ -404,7 +432,7 @@ if __name__ == "__main__":
     utmdata1=[]
     utmdata2=[]
     GPSsentence1 = "$GPGGA"
-    GPSsentence2 = "$GPRMC"
+    GPSsentence2 = "$GPVTG"
     ComChannel1 = "COM3"
     ComChannel2 = "COM9"
     delta_time = 0
@@ -445,19 +473,19 @@ if __name__ == "__main__":
    
 
     i=0
-    loops =50
+    loops =25
     #q1 = Queue.LifoQueue(maxsize=0)
     q1 = LifoQueue(maxsize = 0)
-    q1rmc = LifoQueue(maxsize=0)
+    q1vtg = LifoQueue(maxsize=0)
     q2 = LifoQueue(maxsize=0)
-    q2rmc = LifoQueue(maxsize=0)
+    q2vtg = LifoQueue(maxsize=0)
     qout = LifoQueue(maxsize = 0)
     #q1rmc="nothing"
     #q2rmc="nothing"
     print("Starting GPS reader threads")
     try:
-        thread1 = threading.Thread(target=read_data, args=(s1, q1, q1rmc, 1))
-        thread2 = threading.Thread(target=read_data, args=(s2, q2, q2rmc, 2))
+        thread1 = threading.Thread(target=read_data, args=(s1, q1, q1vtg, 1))
+        thread2 = threading.Thread(target=read_data, args=(s2, q2, q2vtg, 2))
         thread3 = threading.Thread(target = output_NMEA_String, args=(s3,  qout))
         thread1.deamon = True
         thread2.daemon = True
@@ -545,11 +573,11 @@ if __name__ == "__main__":
             GPS1_Update = False
             #print("No GPS Update GPS1")
         try:
-            GPS1rmc = q1rmc.get_nowait()
-            GPS1rmcnew = True
+            GPS1vtg = q1vtg.get_nowait()
+            GPS1vtgnew = True
             #print("rmc get try GPS1", GPS1rmc)
         except:
-            GPS1rmcnew = False
+            GPS1vtgnew = False
         
         try:
             GPS2 = q2.get(.02)
@@ -559,10 +587,10 @@ if __name__ == "__main__":
         except:
             GPS2_Update = False
         try:
-            GPS2rmc = q2rmc.get_nowait()
-            GPS2rmcnew = True
+            GPS2vtg = q2vtg.get_nowait()
+            GPS2vtgnew = True
         except:
-            Gps2rmcnew = False
+            Gps2vtgnew = False
             
         ##ISSUE....DOES NOT GUARANTEE THAT THE TIMESTAMPS ARE MATCHED UP.
         ## CAN HAVE 2 VALID SIGNALS, BUT AT SPEED OF LOOP, IT WILL SOMETIMES MISS
@@ -625,9 +653,13 @@ if __name__ == "__main__":
 #            print("Emptying 1") 
 #        except:
 #            thread1._stop()
+    print("joining threads")
     thread1.join(3)
+    print("1")
     thread2.join(3)
+    print("2")
     thread3.join(3)
+    print("3")
     #plt.close('all')
     print("exited 1:")
     #thread2._stop()
@@ -648,7 +680,23 @@ print("GoodBye")
 
 #print(stringdata2)
 
-
+#Track made good and speed over ground
+#An example of the VTG message string is:
+#
+#$GPVTG,,T,,M,0.00,N,0.00,K*4E#
+#
+#VTG message fields
+#Field	Meaning
+#0	Message ID $GPVTG
+#1	Track made good (degrees true)
+#2	T: track made good is relative to true north
+#3	Track made good (degrees magnetic)
+#4	M: track made good is relative to magnetic north
+#5	Speed, in knots
+#6	N: speed is measured in knots
+#7	Speed over ground in kilometers/hour (kph)
+#8	K: speed over ground is measured in kph
+#9	The checksum data, always begins with *
 #
 #PASHR - RT300 proprietary roll and pitch sentence
 #         1           2   3    4      5      6     7     8     9  10 11 12
